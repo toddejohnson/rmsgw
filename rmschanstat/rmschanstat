@@ -89,11 +89,7 @@ if [ "${TYPE}" = "ax25" ]; then
     # look for the IP address of the port
     #
     set -o noglob
-    IP=($(ps ax | grep attach | egrep "${NAME}[ 	]+" | egrep -o '[0-9]{1,3}.[0-9]{1,3}.[0-9]{1,3}.[0-9]{1,3}' ))
-
-# debug:
-# IP=($(cat /tmp/test123 | grep attach | egrep "${NAME}[ 	]+" | egrep -o '[0-9]{1,3}.[0-9]{1,3}.[0-9]{1,3}.[0-9]{1,3}' ))
-# echo "IP: ${IP}"
+    IP=$(ps ax | grep attach | egrep "${NAME}[ 	]+" | egrep -o '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' )
 
     set +o noglob
 
@@ -108,7 +104,7 @@ if [ "${TYPE}" = "ax25" ]; then
     #
 
     
-    INTERFACE=($(ifconfig | egrep -B 2 ${IP}))
+    INTERFACE=$(ifconfig | egrep -B 2 ${IP}| head -1| cut -d":" -f 1)
     if [ -z "${INTERFACE}" ]; then
         echo "interface with ${IP} unavailable"
         exit 1
