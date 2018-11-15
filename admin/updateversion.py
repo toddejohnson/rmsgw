@@ -35,18 +35,21 @@
 import sys
 import re
 import requests
+import json
+import platform
 from xml.etree import ElementTree
 from optparse import OptionParser
+from distutils.version import LooseVersion
 import syslog
 
 #################################
 # BEGIN CONFIGURATION SECTION
 #################################
 
-DEBUG = 0
 service_config_xml = '/etc/rmsgw/winlinkservice.xml'
 gateway_config = '/etc/rmsgw/gateway.conf'
 version_info = '/etc/rmsgw/.version_info'
+py_version_require='2.7.9'
 
 #################################
 # END CONFIGURATION SECTION
@@ -84,6 +87,19 @@ syslog.openlog(logoption=syslog.LOG_PID, facility=fac)
 syslog.setlogmask(syslog.LOG_UPTO(mask))
 
 #
+# check python version
+#
+python_version=platform.python_version()
+
+if LooseVersion(python_version) >= LooseVersion(py_version_require):
+    if options.DEBUG: syslog.syslog(syslog.LOG_DEBUG, 'Python Version Check: ' + str(python_version) + ' OK')
+else:
+    syslog.syslog(syslog.LOG_ERR, 'Need more current Python version, require version: ' + str(py_version_require) + ' or newer')
+    print('Exiting ...')
+    syslog.closelog()
+    sys.exit(1)
+
+#
 # load service config from XML
 #
 winlink_service = ElementTree.parse(service_config_xml)
@@ -108,11 +124,12 @@ with open(version_info) as versionfile:
         if not line.strip().startswith('#'):
             name, val = line.partition("=")[::2]
             version[name.strip()] = val.strip()
-gwfile.close()
+versionfile.close()
 
 if options.DEBUG: syslog.syslog(syslog.LOG_DEBUG, 'ws_config = {}'.format(ws_config))
 if options.DEBUG: syslog.syslog(syslog.LOG_DEBUG, 'svc_calls = {}'.format(svc_calls))
 if options.DEBUG: syslog.syslog(syslog.LOG_DEBUG, 'param_roots = {}'.format(param_roots))
+if options.DEBUG: syslog.syslog(syslog.LOG_DEBUG, 'version_program = {}'.format(version['PROGRAM']))
 
 #
 # get gateway callsign from config
@@ -121,11 +138,14 @@ if options.DEBUG: syslog.syslog(syslog.LOG_DEBUG, 'param_roots = {}'.format(para
 if 'GWCALL' in gw_config:
     callsign = gw_config['GWCALL'].upper()
 
-if options.DEBUG: syslog.syslog(syslog.LOG_DEBUG, 'callsign = {}'.format(callsign))
+basecall=callsign.split("-", 1)[0]
+if options.DEBUG: syslog.syslog(syslog.LOG_DEBUG, 'basecallsign = {}'.format(basecall))
 
 headers = {'Content-Type': 'application/xml'}
 
-svc_url = 'http://' + ws_config['svchost'] + ':' + ws_config['svcport'] + svc_calls['versionadd']
+# svc_url = 'http://' + ws_config['svchost'] + ':' + ws_config['svcport'] + svc_calls['versionadd']
+# Needs to look like this:
+svc_url = 'https://' + ws_config['svchost'] + svc_calls['versionadd'] + '?' + 'Callsign=' + format(callsign) + '&Program=' + format(version['PROGRAM']) + '&Version=' + format(version['LABEL']) + '&Key=' + format(ws_config['WebServiceAccessCode'] + '&format=json')
 if options.DEBUG: syslog.syslog(syslog.LOG_DEBUG, 'svc_url = {}'.format(svc_url))
 
 #
@@ -134,56 +154,71 @@ if options.DEBUG: syslog.syslog(syslog.LOG_DEBUG, 'svc_url = {}'.format(svc_url)
 version_add = ElementTree.Element(param_roots['versionadd'])
 version_add.set('xmlns:i', 'http://www.w3.org/2001/XMLSchema-instance')
 version_add.set('xmlns', ws_config['namespace'])
+
+ElementTree.SubElement(version_add, "Key")
 ElementTree.SubElement(version_add, "Callsign")
+ElementTree.SubElement(version_add, "Comments")
 ElementTree.SubElement(version_add, "Program")
 ElementTree.SubElement(version_add, "Version")
-ElementTree.SubElement(version_add, "Comments")
 
 if options.DEBUG: syslog.syslog(syslog.LOG_DEBUG, 'bare version_add XML = {}'.format(ElementTree.tostring(version_add)))
 
+#
+# prepare xml parameters for call
+#
+version_add.find('Key').text = ws_config['WebServiceAccessCode']
 version_add.find('Callsign').text = callsign
+version_add.find('Comments').text = version['PACKAGE']
 version_add.find('Program').text = version['PROGRAM']
 version_add.find('Version').text = version['LABEL']
-version_add.find('Comments').text = version['PACKAGE']
 
 if options.DEBUG: syslog.syslog(syslog.LOG_DEBUG, 'version_add XML = {}'.format(ElementTree.tostring(version_add)))
 
-response = requests.post(svc_url, data=ElementTree.tostring(version_add), headers=headers)
+# Post the request
+try:
+    response = requests.post(svc_url, data=ElementTree.tostring(version_add), headers=headers)
+except requests.ConnectionError as e:
+    syslog.syslog(syslog.LOG_DEBUG, "Error: Internet connection failure:")
+    syslog.syslog(syslog.LOG_DEBUG, 'svc_url = {}'.format(svc_url))
+    syslog.syslog(syslog.LOG_DEBUG, str(e))
+    syslog.closelog()
+    sys.exit(1)
+
 if options.DEBUG: syslog.syslog(syslog.LOG_DEBUG, 'Response = {}'.format(response.content))
 
-#
-# build xml element tree from xml response
-#
-document = ElementTree.ElementTree(ElementTree.fromstring(response.content))
-root = document.getroot()
+json_data = response.json()
+if options.DEBUG: print(json.dumps(json_data, indent=2))
+json_dict = json.loads(response.text)
+
+# print the return code of this request, should be 200 which is "OK"
+if options.DEBUG: print("Response status code: " + str(response.status_code))
+if options.DEBUG: print('Debug: Response =', response.content)
+if options.DEBUG: print("Debug: Content type: " + response.headers['content-type'])
 
 #
-# check for errors coming back first
+# Verify request status code
 #
-for error_info in root.iter(ws_config['namespace'] + 'WebServiceResponse'):
-    error_code = int(error_info.find(ws_config['namespace'] + 'ErrorCode').text)
-    if options.DEBUG: syslog.syslog(syslog.LOG_DEBUG, 'Returned ErrorCode = {}'.format(error_code))
-    if error_code > 0:
-        syslog.syslog(syslog.LOG_INFO, 'Version update for {} failed. ErrorCode = {} - {}'.format(callsign, error_code, error_info.find(ws_config['namespace'] + 'ErrorMessage').text))
-        sys.exit(1)
-    
+if response.ok:
+    if options.DEBUG: print("Debug: Good Response status code")
+else:
+    print('*** Version update for ', callsign, 'failed, ErrorCode =',  str(response.status_code))
+    errors += 1
+
 #
 # get status response (if there is one) and confirm success
 #
-for version_add_info in root.iter('{' + ws_config['namespace'] + '}' + 'VersionAddResponse'):
-    #
-    # check that we got a good status response
-    #
-    error_code = int(version_add_info.find('{' + ws_config['namespace'] + '}' + 'ErrorCode').text)
-    error_text = version_add_info.find('{' + ws_config['namespace'] + '}' + 'ErrorMessage').text
-    if options.DEBUG: syslog.syslog(syslog.LOG_DEBUG, 'StatusResponse ErrorCode = {}'.format(error_code))
+if json_dict['ResponseStatus']:
+    print('ResponseStatus not NULL: ', json_dict['ResponseStatus'])
+    print('*** Channel Update for', callsign, 'failed')
+    print('*** Error code:    ' + json_dict['ResponseStatus']['ErrorCode'])
+    print('*** Error message: ' + json_dict['ResponseStatus']['Message'])
 
-    if error_code != 0:
-        # this is unexpected!
-        syslog.syslog(syslog.LOG_ERR, '*** Version update for {} failed, ErrorCode = {} - {}'.format(callsign, error_code, error_text))
-        errors += 1
-    else:
-        syslog.syslog(syslog.LOG_INFO, 'Version update for {} successful.'.format(callsign))
+    errors += 1
+else:
+    if options.DEBUG: print('ResponseStatus is NULL: ', json_dict['ResponseStatus'])
+    syslog.syslog(syslog.LOG_INFO, 'Version update for {} to version {} successful.'.format(callsign, version['LABEL']))
+
+syslog.closelog()
 
 if errors > 0:
     sys.exit(1)

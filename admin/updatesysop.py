@@ -35,21 +35,51 @@
 
 import sys
 import requests
+import json
+import datetime
+import platform
 from xml.etree import ElementTree
+from optparse import OptionParser
+from distutils.version import LooseVersion
 
 #################################
 # BEGIN CONFIGURATION SECTION
 #################################
 
-DEBUG = 0
 service_config_xml = '/etc/rmsgw/winlinkservice.xml'
 sysop_config_xml = '/etc/rmsgw/sysop.xml'
+channel_config_xml = '/etc/rmsgw/channels.xml'
+py_version_require='2.7.9'
 
 #################################
 # END CONFIGURATION SECTION
 #################################
+cmdlineparser = OptionParser()
+cmdlineparser.add_option("-d", "--debug",
+                         action="store_true", dest="DEBUG", default=False,
+                         help="turn on debug output")
+(options, args) = cmdlineparser.parse_args()
+
+#
+# check python version
+#
+python_version=platform.python_version()
+
+if LooseVersion(python_version) >= LooseVersion(py_version_require):
+    if options.DEBUG: print 'Python Version Check: ' + str(python_version) + ' OK'
+else:
+    print sys.argv[0] + ': Error, need more current Python version than: ' + str(python_version) + ' require version: ' + str(py_version_require) + ' or newer'
+    print sys.argv[0] + ': Exiting ...'
+    sys.exit(1)
 
 errors = 0
+
+#
+# load channel config from XML - need password
+#
+
+document = ElementTree.parse(channel_config_xml)
+rmschannels = document.getroot()
 
 #
 # load service config from XML
@@ -57,6 +87,10 @@ errors = 0
 winlink_service = ElementTree.parse(service_config_xml)
 winlink_config = winlink_service.getroot()
 
+#
+# dictionaries for config info
+#
+rms_chans = {}
 ws_config = {}
 svc_calls = {}
 param_roots = {}
@@ -72,15 +106,24 @@ for svc_config in winlink_config.iter('config'):
             svc_calls[svc_call.tag] = svc_call.text
             param_roots[svc_call.tag] = svc_call.attrib['paramRoot']
 
-if DEBUG: print 'ws_config =', ws_config
-if DEBUG: print 'svc_calls =', svc_calls
-if DEBUG: print 'param_roots =', param_roots
+#if options.DEBUG: print "rmschannels xml = {}".format(ElementTree.tostring(rmschannels))
+
+ns = '{http://www.namespace.org}'
+for channel in rmschannels.findall("%schannel" % (ns)):
+#    if options.DEBUG: print 'channel xml = {}'.format(ElementTree.tostring(channel))
+
+    callsign = channel.find("%scallsign" % (ns)).text
+    rms_chans['callsign'] = callsign
+
+    password = channel.find("%spassword" % (ns)).text
+    rms_chans['password'] = password
+
+if options.DEBUG: print 'ws_config =', ws_config
+if options.DEBUG: print 'svc_calls =', svc_calls
+if options.DEBUG: print 'param_roots =', param_roots
+if options.DEBUG: print 'rms_channels =', rms_chans
 
 headers = {'Content-Type': 'application/xml'}
-
-svc_url = 'http://' + ws_config['svchost'] + ':' + ws_config['svcport'] + svc_calls['sysopadd']
-if DEBUG: print 'svc_url =', svc_url
-
 
 #
 # load sysop info from XML
@@ -90,7 +133,8 @@ sysops = document.getroot()
 
 for sysop in sysops.findall('sysop'):
     callsign = sysop.find('Callsign').text
-    print 'Posting sysop record updates for', callsign, '...'
+    callsign = callsign.upper()
+    print 'Posting sysop record update for', callsign, '...'
 
     #
     # prepare xml parameters for call
@@ -98,63 +142,83 @@ for sysop in sysops.findall('sysop'):
     sysop_add = ElementTree.Element(param_roots['sysopadd'])
     sysop_add.set('xmlns:i', 'http://www.w3.org/2001/XMLSchema-instance')
     sysop_add.set('xmlns', ws_config['namespace'])
-    access_code = ElementTree.SubElement(sysop_add, 'WebServiceAccessCode')
+    access_code = ElementTree.SubElement(sysop_add, 'Key')
     access_code.text = ws_config['WebServiceAccessCode']
 
     sysop_add.append(sysop.find('Callsign'))
+    sysop_add.append(sysop.find('City'))
+
+    sysop_comments = sysop.find('Comments').text
+    if sysop_comments and len(sysop_comments.strip()):
+        print "Found Comments: [" + str(len(sysop_comments)) + "] " + str(sysop_comments)
+        sysop_add.append(sysop.find('Comments'))
+    else:
+        print "No Comments found"
+        comment = ElementTree.SubElement(sysop_add, 'Comments')
+        comment.text = 'V5 Services Test: ' + str(datetime.datetime.now())
+
+    sysop_add.append(sysop.find('Country'))
+    sysop_add.append(sysop.find('Email'))
     sysop_add.append(sysop.find('GridSquare'))
-    sysop_add.append(sysop.find('SysopName'))
+
+    pass_code = ElementTree.SubElement(sysop_add, 'Password')
+    pass_code.text = rms_chans['password']
+
+    sysop_add.append(sysop.find('Phones'))
+    sysop_add.append(sysop.find('PostalCode'))
+    sysop_add.append(sysop.find('State'))
     sysop_add.append(sysop.find('StreetAddress1'))
     sysop_add.append(sysop.find('StreetAddress2'))
-    sysop_add.append(sysop.find('City'))
-    sysop_add.append(sysop.find('State'))
-    sysop_add.append(sysop.find('Country'))
-    sysop_add.append(sysop.find('PostalCode'))
-    sysop_add.append(sysop.find('Email'))
-    sysop_add.append(sysop.find('Phones'))
+    sysop_add.append(sysop.find('SysopName'))
     sysop_add.append(sysop.find('Website'))
-    sysop_add.append(sysop.find('Comments'))
 
-    if DEBUG: print 'sysop_add XML =', ElementTree.tostring(sysop_add)
+    if options.DEBUG: print 'sysop_add XML =', ElementTree.tostring(sysop_add)
 
-    response = requests.post(svc_url, data=ElementTree.tostring(sysop_add), headers=headers)
-    if DEBUG: print 'Response =', response.content
+    # Old winlink services url format
+    #svc_url = 'http://' + ws_config['svchost'] + ':' + ws_config['svcport'] + svc_calls['sysopadd']
+    svc_url = 'https://' + ws_config['svchost'] + svc_calls['sysopadd'] + '?' + 'format=json'
+    if options.DEBUG: print 'svc_url =', svc_url
+
+    # Post the request
+    try:
+        response = requests.post(svc_url, data=ElementTree.tostring(sysop_add), headers=headers)
+    except requests.ConnectionError as e:
+        print sys.argv[0] + ": Error: Internet connection failure:"
+        print sys.argv[0] + ': svc_url = ', svc_url
+        print e
+        sys.exit(1)
+
+    if options.DEBUG: print 'Response =', response.content
+
+    json_data = response.json()
+    if options.DEBUG: print(json.dumps(json_data, indent=2))
+    json_dict = json.loads(response.text)
+
+    # print the return code of this request, should be 200 which is "OK"
+    if options.DEBUG: print "Request status code: " + str(response.status_code)
+    if options.DEBUG: print 'Debug: Response =', response.content
+    if options.DEBUG: print "Debug: Content type: " + response.headers['content-type']
 
     #
-    # build xml element tree from xml response
+    # Verify request status code
     #
-    document = ElementTree.ElementTree(ElementTree.fromstring(response.content))
-    root = document.getroot()
+    if response.ok:
+        if options.DEBUG: print "Updatesysop for ", callsign, " Good Request status code"
+    else:
+        print sys.argv[0] + ' *** Sysop update for', callsign, 'failed, ErrorCode =',  str(response.status_code)
+        print sys.argv[0] + ' *** Error code:    ' + json_dict['ResponseStatus']['ErrorCode']
+        print sys.argv[0] + ' *** Error message: ' + json_dict['ResponseStatus']['Message']
+        errors += 1
 
     #
-    # check for errors coming back first
+    # check for errors coming back
     #
-    for error_info in root.iter(ws_config['namespace'] + 'WebServiceResponse'):
-        error_code = int(error_info.find(ws_config['namespace'] + 'ErrorCode').text)
-        if DEBUG: print 'Returned ErrorCode =', error_code
-        if error_code > 0:
-            print 'Get for', callsign, 'failed. ErrorCode =', error_code, '-', error_info.find(ws_config['namespace'] + 'ErrorMessage').text
-            # since theoretically we can have more than one sysop in the xml,
-            # allow the loop to just continue rather than exiting here
-            #sys.exit(1)
-    
-    #
-    # get status response (if there is one) and confirm success
-    #
-    for sysop_info in root.iter('{' + ws_config['namespace'] + '}' + 'StatusResponse'):
-        #
-        # check that we got a good status response
-        #
-        error_code = int(sysop_info.find('{' + ws_config['namespace'] + '}' + 'ErrorCode').text)
-        error_text = sysop_info.find('{' + ws_config['namespace'] + '}' + 'ErrorMessage').text
-        if DEBUG: print 'StatusResponse ErrorCode =', error_code
-
-        if error_code != 0:
-            # this is unexpected!
-            print '*** Update for', callsign, 'failed, ErrorCode = ', error_code, '-', error_text
-            errors += 1
-        else:
-            print 'Update for', callsign, 'successful.'
+    if json_dict['ResponseStatus']:
+        print 'ResponseStatus not NULL: ', json_dict['ResponseStatus']
+        errors += 1
+    else:
+        if options.DEBUG: print 'ResponseStatus is NULL: ', json_dict['ResponseStatus']
+        print 'Sysop update for {} successful.'.format(callsign)
 
 if errors > 0:
     sys.exit(1)

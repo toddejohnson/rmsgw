@@ -1,20 +1,18 @@
 #!/usr/bin/python
-#			g e t s y s o p . p y
-# $Revision: 165 $
-# $Author: eckertb $
-# $Id: getsysop.py 165 2014-06-05 11:28:26Z eckertb $
+#			g e t c h a n n e l . p y
+# $Revision:  $
+# $Author: gunn $
+# $Id: getchannel.py $
 #
 # Description:
-#	RMS Gateway - get the sysop info currently stored in
+#	RMS Gateway - get the channel info currently stored
 #	by the winlink system
 #
 # RMS Gateway
 #
+# This program used getsysop.py as a template.
 # Copyright (c) 2004-2013 Hans-J. Barthen - DL5DI
 # Copyright (c) 2008-2013 Brian R. Eckert - W3SG
-#
-# Questions or problems regarding this program can be emailed
-# to linux-rmsgw@w3sg.org
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -32,13 +30,12 @@
 #
 #
 
-import os
 import sys
 import re
 import requests
 import json
+import time
 import platform
-import datetime
 from xml.etree import ElementTree
 from optparse import OptionParser
 from distutils.version import LooseVersion
@@ -49,15 +46,16 @@ from distutils.version import LooseVersion
 
 gateway_config = '/etc/rmsgw/gateway.conf'
 service_config_xml = '/etc/rmsgw/winlinkservice.xml'
-channel_config_xml = '/etc/rmsgw/channels.xml'
 version_info = '/etc/rmsgw/.version_info'
-
 py_version_require='2.7.9'
 
 #################################
 # END CONFIGURATION SECTION
 #################################
 
+#
+# parse command line args
+#
 cmdlineparser = OptionParser()
 cmdlineparser.add_option("-d", "--debug",
                          action="store_true", dest="DEBUG", default=False,
@@ -69,40 +67,20 @@ cmdlineparser.add_option("-c", "--callsign",
 (options, args) = cmdlineparser.parse_args()
 
 #
-# Check running as root
-#
-if os.geteuid() != 0:
-    print("Must be root, exiting ...")
-    sys.exit(1)
-
-#
 # check python version
 #
 python_version=platform.python_version()
 
-# This does not work with release candidates (Python 2.7.15rc1)
-# if StrictVersion(python_version) >= StrictVersion(py_version_require):
-# This does not work with release candidates (Python 2.7.15+)
-# if parse_version(python_version) >= parse_version(py_version_require):
-
 if LooseVersion(python_version) >= LooseVersion(py_version_require):
-    if options.DEBUG: print('Python Version Check: ' + str(python_version) + ' OK')
+    if options.DEBUG: print( 'Python Version Check: ' + str(python_version) + ' OK')
 else:
-    print('Need more current Python version than: ' + str(python_version) + ' require version: ' + str(py_version_require) + ' or newer')
-    print('Exiting ...')
+    print(sys.argv[0] + ': Error, need more current Python version, require version: ' + str(py_version_require) + ' or newer')
+    print(sys.argv[0] + ': Exiting ...')
     sys.exit(1)
-
-#
-# load channel config from XML - need password
-#
-
-document = ElementTree.parse(channel_config_xml)
-rmschannels = document.getroot()
 
 #
 # dictionaries for config info
 #
-rms_chans = {}
 gw_config = {}
 ws_config = {}
 svc_calls = {}
@@ -153,19 +131,6 @@ for svc_config in winlink_config.iter('config'):
             svc_calls[svc_call.tag] = svc_call.text
             param_roots[svc_call.tag] = svc_call.attrib['paramRoot']
 
-#
-# load channel config from XML - need password
-#
-ns = '{http://www.namespace.org}'
-for channel in rmschannels.findall("%schannel" % (ns)):
-#    if options.DEBUG: print('channel xml = {}'.format(ElementTree.tostring(channel)))
-
-    callsign = channel.find("%scallsign" % (ns)).text
-    rms_chans['callsign'] = callsign
-
-    password = channel.find("%spassword" % (ns)).text
-    rms_chans['password'] = password
-
 if options.DEBUG: print('ws_config =', ws_config)
 if options.DEBUG: print('svc_calls =', svc_calls)
 if options.DEBUG: print('param_roots =', param_roots)
@@ -185,7 +150,7 @@ if options.callsign == None: # no callsign given on cmd line?
     else:
         # ask for callsign if none given on command line
         # and none in the gateway config
-        options.callsign = raw_input('Enter gateway callsign (without SSID): ')
+        options.callsign = input('Enter gateway callsign (without SSID): ')
 
 options.callsign = options.callsign.upper()
 
@@ -200,50 +165,54 @@ headers = {'Content-Type': 'application/xml'}
 #svc_url = 'http://' + ws_config['svchost'] + ':' + ws_config['svcport'] + svc_calls['sysopget']
 
 # V5 CMS web services url format
-svc_url = 'https://' + ws_config['svchost'] + svc_calls['sysop2get'] + '?' + 'Callsign=' + format(options.callsign) + '&Program=' + format(version['PROGRAM']) + '&Password=' + format(rms_chans['password']) + '&Key=' + format(ws_config['WebServiceAccessCode'] + '&format=json')
+svc_url = 'https://' + ws_config['svchost'] + svc_calls['channelget'] + '?' + 'Callsign=' + format(options.callsign) + '&Program=' + format(version['PROGRAM']) + '&Key=' + format(ws_config['WebServiceAccessCode'] + '&format=json')
 if options.DEBUG: print('svc_url =', svc_url)
 
 #
 # prepare xml parameters for call
 #
-sysop_get = ElementTree.Element(param_roots['sysop2get'])
-sysop_get.set('xmlns:i', 'http://www.w3.org/2001/XMLSchema-instance')
-sysop_get.set('xmlns', ws_config['namespace'])
+channel_get = ElementTree.Element(param_roots['channelget'])
+channel_get.set('xmlns:i', 'http://www.w3.org/2001/XMLSchema-instance')
+channel_get.set('xmlns', ws_config['namespace'])
 
-child = ElementTree.SubElement(sysop_get, 'Key')
+child = ElementTree.SubElement(channel_get, 'Key')
 child.text = ws_config['WebServiceAccessCode']
 
-child = ElementTree.SubElement(sysop_get, 'Callsign')
+child = ElementTree.SubElement(channel_get, 'Callsign')
 child.text = options.callsign
 
-if options.DEBUG: print('sysop_get XML =', ElementTree.tostring(sysop_get))
+if options.DEBUG: print('channel_get XML =', ElementTree.tostring(channel_get))
 
 # Post the request
 try:
-    response = requests.post(svc_url, data=ElementTree.tostring(sysop_get), headers=headers)
+    response = requests.post(svc_url, data=ElementTree.tostring(channel_get), headers=headers)
 except requests.ConnectionError as e:
-    print("Error: Internet connection failure:")
-    print('svc_url = ', svc_url)
+    print(sys.argv[0] + ": Error: Internet connection failure:")
+    print(sys.argv[0] + ': svc_url = ', svc_url)
     print(e)
     sys.exit(1)
+
+# print the return code of this request, should be 200 which is "OK"
+if options.DEBUG: print("Request status code: " + str(response.status_code))
+if options.DEBUG: print('Debug: Response =', response.content)
+if options.DEBUG: print("Debug: Content type: " + response.headers['content-type'])
+# print 'ResponseStatus : ', response.json().get('ResponseStatus')
 
 json_data = response.json()
 if options.DEBUG: print((json.dumps(json_data, indent=2)))
 json_dict = json.loads(response.text)
-
-# print the return code of this request, should be 200 which is "OK"
-if options.DEBUG: print("Request status code:" + str(response.status_code))
+num_chan = len(json_data['Channels'])
 
 #
-# Verify request status code"
+# Verify request status code
 #
 if response.ok:
-    if options.DEBUG: print("Debug: Good Request status code")
+    if options.DEBUG: print("Getchannel for ", options.callsign,  " Good Request status code")
 else:
-    print('*** Get for', options.callsign, 'failed, ErrorCode =', str(response.status_code))
-    print('*** Error code:    ' + json_dict['ResponseStatus']['ErrorCode'])
-    print('*** Error message: ' + json_dict['ResponseStatus']['Message'])
-#    sys.exit(1)
+    print(sys.argv[0] + ' *** Getchannel for ', options.callsign, 'failed, ErrorCode =',  str(response.status_code))
+    print(sys.argv[0] + ' *** Error code:    ' + json_dict['ResponseStatus']['ErrorCode'])
+    print(sys.argv[0] + ' *** Error message: ' + json_dict['ResponseStatus']['Message'])
+    sys.exit(1)
 
 #
 # check for errors coming back
@@ -252,52 +221,43 @@ if json_dict['ResponseStatus']:
     print('ResponseStatus not NULL: ', json_dict['ResponseStatus'])
     sys.exit(1)
 else:
-    if options.DEBUG: print(('ResponseStatus is NULL: ', json_dict['ResponseStatus']))
+    if options.DEBUG: print('ResponseStatus is NULL: ', json_dict['ResponseStatus'])
 
 #
 # display the returned data
 #
 
-if options.DEBUG: print("Debug: Response =", response.content)
-if options.DEBUG: print("Debug: Content type: " + response.headers['content-type'])
-# print('ResponseStatus : ', response.json().get('ResponseStatus'))
+print('=== Record for ' + str(num_chan) + ' Channel(s) In Winlink System ===')
 
-print('=== Current Sysop Record From Winlink System ===')
+for i in range(num_chan):
+    print('== data for record ' + str(i+1) + ' ==')
+    print
 
-# it looks like this will be caught by the winlink system
-# and give an appropriate error in the response, so this
-# check may not be necessary.
+    # Convert non standard UTC date string to a local time
+    date_str = json_dict['Channels'][int(i)]['Timestamp']
+    date_str = date_str.split("(")[1]
+    date_str = date_str.split(")")[0]
+    date_str = date_str[0:10]
+    print('Date:            ' + time.strftime("%Z - %Y/%m/%d, %H:%M:%S", time.localtime(float(date_str))))
+    print('Call sign:       ' + json_dict['Channels'][int(i)]['Callsign'])
+    print('Base Call sign:  ' + json_dict['Channels'][int(i)]['BaseCallsign'])
+    print('Grid Square:     ' + json_dict['Channels'][int(i)]['GridSquare'])
+    print('Frequency:       ' + str(json_dict['Channels'][int(i)]['Frequency']))
+    print('Baud:            ' + str(json_dict['Channels'][int(i)]['Baud']))
+    print('Power:           ' + str(json_dict['Channels'][int(i)]['Power']))
+    print('Height:          ' + str(json_dict['Channels'][int(i)]['Height']))
+    print('Gain:            ' + str(json_dict['Channels'][int(i)]['Gain']))
+    print('Direction:       ' + str(json_dict['Channels'][int(i)]['Direction']))
+    print('Operating Hours: ' + str(json_dict['Channels'][int(i)]['OperatingHours']))
+    print('Service Code:    ' + json_dict['Channels'][int(i)]['ServiceCode'])
 
-returned_callsign=json_dict['Sysop']['Callsign']
 
-if returned_callsign and returned_callsign.strip():
-    print('Callsign:        ' + returned_callsign)
-else:
-    print('*** No record found for', options.callsign)
-    sys.exit(2)
+       # it looks like this will be caught by the winlink system
+       # and give an appropriate error in the response, so this
+       # check may not be necessary any longer, but it hurts nothing
+#       if returned_callsign == None:
+#           print '*** No record found for', options.callsign
+#           sys.exit(2)
 
-print('GridSquare:      ' + json_dict['Sysop']['GridSquare'])
-print('SysopName:       ' + json_dict['Sysop']['SysopName'])
-print('StreetAddress1:  ' + json_dict['Sysop']['StreetAddress1'])
-print('StreetAddress2:  ' + json_dict['Sysop']['StreetAddress2'])
-print('City:            ' + json_dict['Sysop']['City'])
-print('State:           ' + json_dict['Sysop']['State'])
-print('Country:         ' + json_dict['Sysop']['Country'])
-print('PostalCode:      ' + json_dict['Sysop']['PostalCode'])
-print('Email:           ' + json_dict['Sysop']['Email'])
-print('Phones:          ' + json_dict['Sysop']['Phones'])
-print('Website:         ' + json_dict['Sysop']['Website'])
-print('Comments:        ' + json_dict['Sysop']['Comments'])
 
-# Convert timestamp format /Date(<milliseconds>)/ to a readable form
-timestamp=json_dict['Sysop']['Timestamp']
-timestamp1=timestamp.split('(')
-timestamp=timestamp1[1].split(')')[0]
-
-# Convert string to float
-f_timestamp=float(timestamp)
-# Have time stamp in milliseconds, need seconds
-timeformat=datetime.datetime.fromtimestamp(f_timestamp/1000).strftime('%c')
-
-print('Last Updated:    ' + timeformat)
 sys.exit(0)
