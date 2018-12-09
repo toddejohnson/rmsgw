@@ -108,13 +108,7 @@ if [ "${TYPE}" = "ax25" ]; then
     # (pos 7 when using ax25, pos 8 for 6pack)
     #
 
-<<<<<<< HEAD
-    
-    INTERFACE=$(ifconfig | egrep -B 2 ${IP}| head -1| cut -d":" -f 1)
-=======
-
     INTERFACE=($(ifconfig | egrep -B 2 ${IP}))
->>>>>>> upstream/master
     if [ -z "${INTERFACE}" ]; then
         echo "interface with ${IP} unavailable"
         exit 1
